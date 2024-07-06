@@ -152,3 +152,18 @@ pub fn run_next_app() -> ! {
     }
     panic!("Unreachable in batch::run_current_app!");
 }
+
+/// get current app index
+pub fn get_current_app_index() {
+    let app_manager = APP_MANAGER.exclusive_access();
+    println!("current app index {}", app_manager.get_current_app());
+}
+
+/// check pointer in current app
+pub fn check_pointer(p: usize, len: usize) -> bool {
+    let instruction_range = APP_BASE_ADDRESS..APP_BASE_ADDRESS + APP_SIZE_LIMIT;
+    let stack_range = USER_STACK.get_sp() - 4096..USER_STACK.get_sp();
+
+    (instruction_range.contains(&p) && instruction_range.contains(&(p + len)))
+        || (stack_range.contains(&p) && stack_range.contains(&(p + len)))
+}

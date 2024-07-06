@@ -15,16 +15,33 @@ const SYSCALL_WRITE: usize = 64;
 /// exit syscall
 const SYSCALL_EXIT: usize = 93;
 
+const SYSCALL_APP_IDX: usize = 94;
+
 mod fs;
 mod process;
 
+use crate::sync::UPSafeCell;
 use fs::*;
+use lazy_static::*;
 use process::*;
+
+lazy_static! {
+    static ref SYSCALL_COUNTER: UPSafeCell<[u32; 256]> = unsafe { UPSafeCell::new([0; 256]) };
+}
+
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    let mut counter = SYSCALL_COUNTER.exclusive_access();
+    counter[syscall_id] += 1;
+    if counter[syscall_id] % 10 == 1 {
+        println!("calling {} for {} times", syscall_id, counter[syscall_id]);
+    }
+    drop(counter);
+
     match syscall_id {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_APP_IDX => sys_current_app(),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
