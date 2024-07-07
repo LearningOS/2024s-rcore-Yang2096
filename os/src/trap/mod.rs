@@ -46,6 +46,8 @@ pub fn enable_timer_interrupt() {
 /// trap handler
 #[no_mangle]
 pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
+    // 从用户态切换到内核态，需要刷新用户态所度过的时间
+    crate::task::user_time_end();
     let scause = scause::read(); // get trap cause
     let stval = stval::read(); // get extra value
                                // trace!("into {:?}", scause.cause());
@@ -76,6 +78,10 @@ pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
             );
         }
     }
+    // timer 触发 suspend_current_and_run_next(), 每一个 TaskContext 里保存的返回地址就是此处
+    // 如果是切换相关的内核时间统计，则会保存到后面的那一个任务上
+    // 如果是系统调用引发的时间统计，则会保存到当前的任务上
+    crate::task::user_time_start();
     cx
 }
 

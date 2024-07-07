@@ -16,6 +16,11 @@ pub struct TaskControlBlock {
     pub last_start_time_ms: usize,
     /// total run time
     pub total_run_time: usize,
+
+    /// from after-class practice
+    pub user_time: usize,
+    /// 
+    pub kernel_time: usize,
 }
 
 /// The status of a task

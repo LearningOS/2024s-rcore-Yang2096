@@ -18,7 +18,7 @@ use crate::config::{MAX_APP_NUM, MAX_SYSCALL_NUM};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use crate::syscall::TaskInfo;
-use crate::timer::get_time_ms;
+use crate::timer::{get_time_ms, get_time_us};
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -47,6 +47,17 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+
+    /// 功能只是记录前后两次调用之间的时间差，所有的任务共享一个停表
+    stop_watch: usize,
+}
+
+impl TaskManagerInner {
+    fn refresh_stop_watch(&mut self) -> usize {
+        let start_time = self.stop_watch;
+        self.stop_watch = get_time_us();
+        self.stop_watch - start_time
+    }
 }
 
 lazy_static! {
@@ -59,6 +70,8 @@ lazy_static! {
               syscall_times: [0; MAX_SYSCALL_NUM],
               last_start_time_ms: 0,
               total_run_time: 0,
+              user_time: 0,
+              kernel_time: 0,
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             // 将用户态程序的 entry 放到 TrapContext 中，把 TrapContext 放到 KernelStack，把 KernelStack 的 sp 放到 TaskContext
@@ -71,6 +84,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    stop_watch: 0,
                 })
             },
         }
@@ -86,8 +100,11 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+        // 计算任务运行时间
         task0.last_start_time_ms = get_time_ms();
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
+        // 记录开始时间
+        inner.refresh_stop_watch();
         drop(inner);
         let mut _unused = TaskContext::zero_init();
         // before this, we should drop local variables that must be dropped manually
@@ -102,12 +119,22 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
         inner.tasks[current].task_status = TaskStatus::Ready;
+        // 统计内核时间
+        inner.tasks[current].kernel_time += inner.refresh_stop_watch();
+        inner.tasks[current].task_status = TaskStatus::Ready;
     }
 
     /// Change the status of current `Running` task into `Exited`.
     fn mark_current_exited(&self) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
+        inner.tasks[current].task_status = TaskStatus::Exited;
+        // 统计内核时间并输出
+        inner.tasks[current].kernel_time += inner.refresh_stop_watch();
+        println!(
+            "[task {} exited. user_time: {} us, kernle_time: {} us.",
+            current, inner.tasks[current].user_time, inner.tasks[current].kernel_time
+        );
         inner.tasks[current].task_status = TaskStatus::Exited;
     }
 
@@ -167,6 +194,20 @@ impl TaskManager {
         }
         result.syscall_times = current.syscall_times;
     }
+
+    /// 统计内核时间，从现在开始算的是用户时间
+    fn user_time_start(&self) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].kernel_time += inner.refresh_stop_watch();
+    }
+
+    /// 统计用户时间，从现在开始算的是内核时间
+    fn user_time_end(&self) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].user_time += inner.refresh_stop_watch();
+    }
 }
 
 /// Run the first task in task list.
@@ -187,6 +228,7 @@ fn mark_current_suspended() {
 
 /// Change the status of current `Running` task into `Exited`.
 fn mark_current_exited() {
+    println!("current task exited");
     TASK_MANAGER.mark_current_exited();
 }
 
@@ -210,4 +252,14 @@ pub fn get_current_task_info(result: &mut TaskInfo) {
 /// count syscall
 pub fn count_syscall(syscall_id: usize) {
     TASK_MANAGER.count_syscall(syscall_id);
+}
+
+/// 统计内核时间，从现在开始算的是用户时间
+pub fn user_time_start() {
+    TASK_MANAGER.user_time_start()
+}
+
+/// 统计用户时间，从现在开始算的是内核时间
+pub fn user_time_end() {
+    TASK_MANAGER.user_time_end()
 }
