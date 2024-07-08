@@ -1,5 +1,6 @@
 //! Types related to task management
 use super::TaskContext;
+use crate::config::MAX_SYSCALL_NUM;
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
@@ -13,6 +14,18 @@ pub struct TaskControlBlock {
 
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
+
+    /// The numbers of syscall called by task
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+    /// last start time
+    pub last_start_time_ms: usize,
+    /// total run time
+    pub total_run_time: usize,
+
+    /// from after-class practice
+    pub user_time: usize,
+    ///
+    pub kernel_time: usize,
 
     /// Application address space
     pub memory_set: MemorySet,
@@ -60,6 +73,11 @@ impl TaskControlBlock {
             task_cx: TaskContext::goto_trap_return(kernel_stack_top),
             memory_set,
             trap_cx_ppn,
+            syscall_times: [0; MAX_SYSCALL_NUM],
+            last_start_time_ms: 0,
+            total_run_time: 0,
+            user_time: 0,
+            kernel_time: 0,
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,

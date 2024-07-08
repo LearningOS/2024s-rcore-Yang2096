@@ -14,8 +14,11 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
+use crate::syscall::TaskInfo;
+use crate::timer::{get_time_ms, get_time_us};
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -46,6 +49,17 @@ struct TaskManagerInner {
     tasks: Vec<TaskControlBlock>,
     /// id of current `Running` task
     current_task: usize,
+
+    /// 功能只是记录前后两次调用之间的时间差，所有的任务共享一个停表
+    stop_watch: usize,
+}
+
+impl TaskManagerInner {
+    fn refresh_stop_watch(&mut self) -> usize {
+        let start_time = self.stop_watch;
+        self.stop_watch = get_time_us();
+        self.stop_watch - start_time
+    }
 }
 
 lazy_static! {
@@ -64,6 +78,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    stop_watch: 0,
                 })
             },
         }
@@ -79,7 +94,11 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        // 计算任务运行时间
+        next_task.last_start_time_ms = get_time_ms();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
+        // 记录开始时间
+        inner.refresh_stop_watch();
         drop(inner);
         let mut _unused = TaskContext::zero_init();
         // before this, we should drop local variables that must be dropped manually
@@ -94,12 +113,22 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let cur = inner.current_task;
         inner.tasks[cur].task_status = TaskStatus::Ready;
+        // 统计内核时间
+        inner.tasks[cur].kernel_time += inner.refresh_stop_watch();
+        inner.tasks[cur].task_status = TaskStatus::Ready;
     }
 
     /// Change the status of current `Running` task into `Exited`.
     fn mark_current_exited(&self) {
         let mut inner = self.inner.exclusive_access();
         let cur = inner.current_task;
+        inner.tasks[cur].task_status = TaskStatus::Exited;
+        // 统计内核时间并输出
+        inner.tasks[cur].kernel_time += inner.refresh_stop_watch();
+        println!(
+            "[task {} exited. user_time: {} us, kernle_time: {} us.",
+            cur, inner.tasks[cur].user_time, inner.tasks[cur].kernel_time
+        );
         inner.tasks[cur].task_status = TaskStatus::Exited;
     }
 
@@ -141,6 +170,10 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
+            let now = get_time_ms();
+            inner.tasks[current].total_run_time += now - inner.tasks[current].last_start_time_ms;
+            inner.tasks[current].last_start_time_ms = 0;
+            inner.tasks[current].last_start_time_ms = now;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
@@ -152,6 +185,41 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    fn count_syscall(&self, syscall_id: usize) {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return;
+        }
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current = &mut inner.tasks[current];
+        current.syscall_times[syscall_id] += 1;
+    }
+
+    fn get_current_task_info(&self, result: &mut TaskInfo) {
+        let inner = self.inner.exclusive_access();
+        let current = &inner.tasks[inner.current_task];
+        result.status = current.task_status;
+        result.time = current.total_run_time;
+        if current.last_start_time_ms != 0 {
+            result.time += get_time_ms() - current.last_start_time_ms;
+        }
+        result.syscall_times = current.syscall_times;
+    }
+
+    /// 统计内核时间，从现在开始算的是用户时间
+    fn user_time_start(&self) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].kernel_time += inner.refresh_stop_watch();
+    }
+
+    /// 统计用户时间，从现在开始算的是内核时间
+    fn user_time_end(&self) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].user_time += inner.refresh_stop_watch();
     }
 }
 
@@ -201,4 +269,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// get current task info
+pub fn get_current_task_info(result: &mut TaskInfo) {
+    TASK_MANAGER.get_current_task_info(result);
+}
+
+/// count syscall
+pub fn count_syscall(syscall_id: usize) {
+    TASK_MANAGER.count_syscall(syscall_id);
+}
+
+/// 统计内核时间，从现在开始算的是用户时间
+pub fn user_time_start() {
+    TASK_MANAGER.user_time_start()
+}
+
+/// 统计用户时间，从现在开始算的是内核时间
+pub fn user_time_end() {
+    TASK_MANAGER.user_time_end()
 }
