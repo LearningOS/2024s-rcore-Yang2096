@@ -9,6 +9,7 @@ use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 
 /// tracker for physical page frame allocation and deallocation
+/// 对 PhysPageNum 进行 RAII 的包装
 pub struct FrameTracker {
     /// physical page number
     pub ppn: PhysPageNum,
@@ -99,6 +100,7 @@ pub fn init_frame_allocator() {
         fn ekernel();
     }
     FRAME_ALLOCATOR.exclusive_access().init(
+        // 这个 ceil 在正好是 4096 的整数倍时指向的还是自己，意思是 ekernel 是内核文件的结束后一 byte 的地址
         PhysAddr::from(ekernel as usize).ceil(),
         PhysAddr::from(MEMORY_END).floor(),
     );

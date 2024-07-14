@@ -101,6 +101,8 @@ impl PageTable {
             if !pte.is_valid() {
                 let frame = frame_alloc().unwrap();
                 *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
+                // 由于没有对每级页表中的页表项进行针对性的回收，这里所有的页表都加到了 self.frames 中统一管理
+                // 事实上并没有对 frames 进行回收的操作
                 self.frames.push(frame);
             }
             ppn = pte.ppn();

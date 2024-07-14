@@ -16,6 +16,7 @@ mod task;
 
 use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::syscall::TaskInfo;
 use crate::timer::{get_time_ms, get_time_us};
@@ -221,6 +222,70 @@ impl TaskManager {
         let current = inner.current_task;
         inner.tasks[current].user_time += inner.refresh_stop_watch();
     }
+
+    fn mmap(&self, start: usize, len: usize, port: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_set: &mut _ = &mut inner.tasks[current].memory_set;
+
+        let mut permission = MapPermission::U;
+        permission.set(MapPermission::R, (port & 0b0001) != 0);
+        permission.set(MapPermission::W, (port & 0b0010) != 0);
+        permission.set(MapPermission::X, (port & 0b0100) != 0);
+
+        let start_va: VirtAddr = start.into();
+        let end_va: VirtAddr = (start + len).into();
+
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        let mut i = start_vpn;
+        while i != end_vpn {
+            if let Some(pte) = current_set.translate(i) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+            i.0 += 1;
+        }
+
+        println!(
+            "insert frame [{:?} ~ {:?}) [{:?} ~ {:?}) with {:?}",
+            start_va, end_va, start_vpn, end_vpn,  permission
+        );
+        current_set.insert_framed_area(start_va, end_va, permission);
+
+        true
+    }
+
+    fn munmap(&self, start: usize, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_set: &mut _ = &mut inner.tasks[current].memory_set;
+
+        let start_va: VirtAddr = start.into();
+        let end_va: VirtAddr = (start + len).into();
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        let mut i = start_vpn;
+        while i != end_vpn {
+            if let Some(pte) = current_set.translate(i) {
+                if !pte.is_valid() {
+                    return false;
+                }
+            }
+            i.0 += 1;
+        }
+
+        println!(
+            "delete frame [{:?} ~ {:?}) [{:?} ~ {:?})",
+            start_va, end_va, start_vpn, end_vpn 
+        );
+        current_set.munmap(start_vpn, end_vpn);
+
+        true
+    }
 }
 
 /// Run the first task in task list.
@@ -289,4 +354,14 @@ pub fn user_time_start() {
 /// 统计用户时间，从现在开始算的是内核时间
 pub fn user_time_end() {
     TASK_MANAGER.user_time_end()
+}
+
+/// mmap impl
+pub fn mmap(start: usize, len: usize, port: usize) -> bool {
+    TASK_MANAGER.mmap(start, len, port)
+}
+
+/// munmap impl
+pub fn munmap(start: usize, len: usize) -> bool {
+    TASK_MANAGER.munmap(start, len)
 }
