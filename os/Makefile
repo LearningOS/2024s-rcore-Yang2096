@@ -30,7 +30,7 @@ BASE ?= 1
 # Disassembly
 DISASM ?= -x
 
-build: env $(KERNEL_BIN)
+build: $(KERNEL_BIN)
 
 env:
 ifeq ($(OFFLINE),)
