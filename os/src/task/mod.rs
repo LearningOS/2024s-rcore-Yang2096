@@ -21,7 +21,7 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::loader::get_app_data_by_name;
+use crate::{loader::get_app_data_by_name, syscall::TaskInfo};
 use alloc::sync::Arc;
 use lazy_static::*;
 pub use manager::{fetch_task, TaskManager};
@@ -114,4 +114,24 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
+}
+
+/// get current task info
+pub fn get_current_task_info(result: &mut TaskInfo) {
+    current_task().unwrap().get_current_task_info(result);
+}
+
+/// count syscall
+pub fn count_syscall(syscall_id: usize) {
+    current_task().unwrap().count_syscall(syscall_id);
+}
+
+/// mmap impl
+pub fn mmap(start: usize, len: usize, port: usize) -> bool {
+    current_task().unwrap().mmap(start, len, port)
+}
+
+/// munmap impl
+pub fn munmap(start: usize, len: usize) -> bool {
+    current_task().unwrap().munmap(start, len)
 }

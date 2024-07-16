@@ -1,9 +1,11 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::syscall::TaskInfo;
+use crate::timer::get_time_ms;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -50,6 +52,11 @@ pub struct TaskControlBlockInner {
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
 
+    /// The numbers of syscall called by task
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+    /// start time
+    pub start_time_ms: usize,
+
     /// Application address space
     pub memory_set: MemorySet,
 
@@ -94,6 +101,7 @@ impl TaskControlBlock {
     pub fn new(elf_data: &[u8]) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        // 用户内存空间 memory_set 下 TRAP_CONTEXT_BASE 对应的 ppn
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -112,6 +120,8 @@ impl TaskControlBlock {
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    start_time_ms: 0,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -185,6 +195,8 @@ impl TaskControlBlock {
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    start_time_ms: 0,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -235,6 +247,89 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// custom count syscall impl
+    pub fn count_syscall(&self, syscall_id: usize) {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return;
+        }
+        let mut inner = self.inner.exclusive_access();
+        inner.syscall_times[syscall_id] += 1;
+    }
+
+    /// custom get task info impl
+    pub fn get_current_task_info(&self, result: &mut TaskInfo) {
+        let inner = self.inner.exclusive_access();
+        result.status = inner.task_status;
+        if inner.start_time_ms != 0 {
+            result.time = get_time_ms() - inner.start_time_ms;
+        }
+        result.syscall_times = inner.syscall_times;
+    }
+
+    /// custom mmap impl
+    pub fn mmap(&self, start: usize, len: usize, port: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current_set: &mut _ = &mut inner.memory_set;
+
+        let mut permission = MapPermission::U;
+        permission.set(MapPermission::R, (port & 0b0001) != 0);
+        permission.set(MapPermission::W, (port & 0b0010) != 0);
+        permission.set(MapPermission::X, (port & 0b0100) != 0);
+
+        let start_va: VirtAddr = start.into();
+        let end_va: VirtAddr = (start + len).into();
+
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        let mut i = start_vpn;
+        while i != end_vpn {
+            if let Some(pte) = current_set.translate(i) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+            i.0 += 1;
+        }
+
+        println!(
+            "insert frame [{:?} ~ {:?}) [{:?} ~ {:?}) with {:?}",
+            start_va, end_va, start_vpn, end_vpn, permission
+        );
+        current_set.insert_framed_area(start_va, end_va, permission);
+
+        true
+    }
+
+    /// custom munmap impl
+    pub fn munmap(&self, start: usize, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current_set: &mut _ = &mut inner.memory_set;
+
+        let start_va: VirtAddr = start.into();
+        let end_va: VirtAddr = (start + len).into();
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        let mut i = start_vpn;
+        while i != end_vpn {
+            if let Some(pte) = current_set.translate(i) {
+                if !pte.is_valid() {
+                    return false;
+                }
+            }
+            i.0 += 1;
+        }
+
+        println!(
+            "delete frame [{:?} ~ {:?}) [{:?} ~ {:?})",
+            start_va, end_va, start_vpn, end_vpn
+        );
+        current_set.munmap(start_vpn, end_vpn);
+
+        true
     }
 }
 
