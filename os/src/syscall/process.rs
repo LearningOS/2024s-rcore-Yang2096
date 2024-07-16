@@ -69,8 +69,21 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
 pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
     trace!("kernel: sys_task_info");
-    if let Some(result) = unsafe { _ti.as_mut() } {
-        get_current_task_info(result);
+    if let Some(_) = unsafe { _ti.as_mut() } {
+        let buffers = translated_byte_buffer(current_user_token(), _ti as _, mem::size_of::<TaskInfo>());
+        let mut task_info = TaskInfo {
+            status: TaskStatus::UnInit,
+            syscall_times: [0; MAX_SYSCALL_NUM],
+            time: 0,
+        };
+        get_current_task_info(&mut task_info);
+        let ti_bytes: &[u8; mem::size_of::<TaskInfo>()] = unsafe { mem::transmute(&task_info) };
+        let mut offset = 0;
+        for buffer in buffers {
+            let len = buffer.len();
+            buffer.copy_from_slice(&ti_bytes[offset..offset + len]);
+            offset += len;
+        }
         0
     } else {
         -1
