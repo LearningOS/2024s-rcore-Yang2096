@@ -54,8 +54,16 @@ pub struct TaskControlBlockInner {
 
     /// The numbers of syscall called by task
     pub syscall_times: [u32; MAX_SYSCALL_NUM],
-    /// start time
-    pub start_time_ms: usize,
+
+    /// kernel time
+    pub kernel_time: usize,
+    /// user time
+    pub user_time: usize,
+    /// stop watch
+    pub stop_watch: usize,
+
+    pub priority: usize,
+    pub pass: usize, // for stride schedule algorithm
 
     /// Application address space
     pub memory_set: MemorySet,
@@ -92,6 +100,12 @@ impl TaskControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
+    
+    pub fn refresh_stop_watch(&mut self) -> usize {
+        let start_time = self.stop_watch;
+        self.stop_watch = get_time_ms();
+        self.stop_watch - start_time
+    }
 }
 
 impl TaskControlBlock {
@@ -121,7 +135,11 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
                     syscall_times: [0; MAX_SYSCALL_NUM],
-                    start_time_ms: 0,
+                    kernel_time: 0,
+                    user_time: 0,
+                    stop_watch: 0,
+                    priority: 16,
+                    pass: 0,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -196,7 +214,11 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
                     syscall_times: [0; MAX_SYSCALL_NUM],
-                    start_time_ms: 0,
+                    kernel_time: 0,
+                    user_time: 0,
+                    stop_watch: 0,
+                    priority: 16,
+                    pass: 0,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -216,6 +238,19 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// custom spawn impl
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let mut parent_inner = self.inner_exclusive_access();
+
+        let task_control_block = Arc::new(Self::new(elf_data));
+        let mut inner = task_control_block.inner_exclusive_access();
+        inner.parent = Some(Arc::downgrade(self));
+        drop(inner);
+
+        parent_inner.children.push(task_control_block.clone());
+        task_control_block
     }
 
     /// get pid of process
@@ -262,9 +297,7 @@ impl TaskControlBlock {
     pub fn get_current_task_info(&self, result: &mut TaskInfo) {
         let inner = self.inner.exclusive_access();
         result.status = inner.task_status;
-        if inner.start_time_ms != 0 {
-            result.time = get_time_ms() - inner.start_time_ms;
-        }
+        result.time = inner.user_time + inner.kernel_time;
         result.syscall_times = inner.syscall_times;
     }
 

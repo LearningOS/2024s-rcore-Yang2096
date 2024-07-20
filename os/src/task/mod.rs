@@ -43,6 +43,8 @@ pub fn suspend_current_and_run_next() {
     // ---- access current TCB exclusively
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+    // count kernel time
+    task_inner.kernel_time += task_inner.refresh_stop_watch();
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
@@ -114,6 +116,20 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
+}
+
+/// how much time passed before this new round of user execution
+pub fn user_time_start() {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access(); 
+    inner.kernel_time += inner.refresh_stop_watch();
+}
+
+/// 
+pub fn user_time_end() {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.user_time += inner.refresh_stop_watch();
 }
 
 /// get current task info
