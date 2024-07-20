@@ -56,6 +56,7 @@ pub fn enable_timer_interrupt() {
 /// trap handler
 #[no_mangle]
 pub fn trap_handler() -> ! {
+    crate::task::user_time_end();
     set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
@@ -103,6 +104,7 @@ pub fn trap_handler() -> ! {
             );
         }
     }
+    crate::task::user_time_start();
     //println!("before trap_return");
     trap_return();
 }
