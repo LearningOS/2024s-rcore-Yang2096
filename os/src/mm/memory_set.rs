@@ -317,6 +317,73 @@ impl MemorySet {
             false
         }
     }
+
+    /// munmap impl
+    pub fn munmap(&mut self, mut start: VirtPageNum, end: VirtPageNum) -> bool {
+        let mut remove_index = Vec::new();
+        let mut append_area = None;
+        while start != end {
+            let step;
+            if let Some((i, area)) = self
+                .areas
+                .iter_mut()
+                .enumerate()
+                .find(|(_, area)| area.vpn_range.contains(&start))
+            {
+                let mut vpn = start;
+                while vpn != area.vpn_range.get_end() && vpn != end {
+                    println!("unmap vpn {:?}", vpn);
+                    area.unmap_one(&mut self.page_table, vpn);
+                    vpn.0 += 1;
+                }
+
+                step = area.vpn_range.get_end().0.min(end.0) - start.0;
+
+                if area.data_frames.is_empty() {
+                    // 全部帧都没有了
+                    remove_index.push(i);
+                    break;
+                } else if area.vpn_range.get_start() == start {
+                    // 开头没了
+                    area.vpn_range = VPNRange::new(start, area.vpn_range.get_end());
+                    break;
+                } else if area.vpn_range.get_end() >= end {
+                    // 结尾没了
+                    area.vpn_range = VPNRange::new(area.vpn_range.get_start(), start);
+                    // not break, we shall continue
+                } else {
+                    // 中间没了
+                    let mut tail_half = MapArea {
+                        vpn_range: VPNRange::new(end, area.vpn_range.get_end()),
+                        data_frames: BTreeMap::new(),
+                        map_type: area.map_type,
+                        map_perm: area.map_perm,
+                    };
+                    area.vpn_range = VPNRange::new(area.vpn_range.get_start(), start);
+                    for vpn in tail_half.vpn_range {
+                        area.data_frames
+                            .remove(&vpn)
+                            .map(|value| tail_half.data_frames.insert(vpn, value));
+                    }
+                    append_area = Some(tail_half);
+                    break;
+                }
+            } else {
+                break;
+            }
+            start.0 += step;
+        }
+
+        for i in remove_index {
+            self.areas.remove(i);
+        }
+
+        if let Some(area) = append_area.take() {
+            self.areas.push(area);
+        }
+
+        true
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

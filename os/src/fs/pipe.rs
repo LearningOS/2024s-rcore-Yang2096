@@ -173,4 +173,8 @@ impl File for Pipe {
             }
         }
     }
+
+    fn state(&self) -> super::Stat {
+        Default::default()
+    }
 }

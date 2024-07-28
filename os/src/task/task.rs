@@ -1,10 +1,14 @@
 //! Types related to task management & Functions for completely changing TCB
 
-use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext};
+use super::{
+    kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext,
+};
+use crate::syscall::TaskInfo;
+use crate::timer::get_time_ms;
 use crate::{
-    config::TRAP_CONTEXT_BASE,
+    config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE},
     fs::{File, Stdin, Stdout},
-    mm::{translated_refmut, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
+    mm::{translated_refmut, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE},
     sync::UPSafeCell,
     trap::{trap_handler, TrapContext},
 };
@@ -57,6 +61,19 @@ pub struct TaskControlBlockInner {
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
 
+    /// The numbers of syscall called by task
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    /// kernel time
+    pub kernel_time: usize,
+    /// user time
+    pub user_time: usize,
+    /// stop watch
+    pub stop_watch: usize,
+
+    pub priority: usize,
+    pub pass: usize, // for stride schedule algorithm
+
     /// Application address space
     pub memory_set: MemorySet,
 
@@ -102,6 +119,12 @@ impl TaskControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
+    
+    pub fn refresh_stop_watch(&mut self) -> usize {
+        let start_time = self.stop_watch;
+        self.stop_watch = get_time_ms();
+        self.stop_watch - start_time
+    }
     pub fn alloc_fd(&mut self) -> usize {
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
             fd
@@ -119,6 +142,7 @@ impl TaskControlBlock {
     pub fn new(elf_data: &[u8]) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        // 用户内存空间 memory_set 下 TRAP_CONTEXT_BASE 对应的 ppn
         let trap_cx_ppn = memory_set
             .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
@@ -137,6 +161,12 @@ impl TaskControlBlock {
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    kernel_time: 0,
+                    user_time: 0,
+                    stop_watch: 0,
+                    priority: 16,
+                    pass: 0,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -258,6 +288,12 @@ impl TaskControlBlock {
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    kernel_time: 0,
+                    user_time: 0,
+                    stop_watch: 0,
+                    priority: 16,
+                    pass: 0,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -286,6 +322,19 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// custom spawn impl
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let mut parent_inner = self.inner_exclusive_access();
+
+        let task_control_block = Arc::new(Self::new(elf_data));
+        let mut inner = task_control_block.inner_exclusive_access();
+        inner.parent = Some(Arc::downgrade(self));
+        drop(inner);
+
+        parent_inner.children.push(task_control_block.clone());
+        task_control_block
     }
 
     /// get pid of process
@@ -317,6 +366,87 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// custom count syscall impl
+    pub fn count_syscall(&self, syscall_id: usize) {
+        if syscall_id >= MAX_SYSCALL_NUM {
+            return;
+        }
+        let mut inner = self.inner.exclusive_access();
+        inner.syscall_times[syscall_id] += 1;
+    }
+
+    /// custom get task info impl
+    pub fn get_current_task_info(&self, result: &mut TaskInfo) {
+        let inner = self.inner.exclusive_access();
+        result.status = inner.task_status;
+        result.time = inner.user_time + inner.kernel_time;
+        result.syscall_times = inner.syscall_times;
+    }
+
+    /// custom mmap impl
+    pub fn mmap(&self, start: usize, len: usize, port: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current_set: &mut _ = &mut inner.memory_set;
+
+        let mut permission = MapPermission::U;
+        permission.set(MapPermission::R, (port & 0b0001) != 0);
+        permission.set(MapPermission::W, (port & 0b0010) != 0);
+        permission.set(MapPermission::X, (port & 0b0100) != 0);
+
+        let start_va: VirtAddr = start.into();
+        let end_va: VirtAddr = (start + len).into();
+
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        let mut i = start_vpn;
+        while i != end_vpn {
+            if let Some(pte) = current_set.translate(i) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+            i.0 += 1;
+        }
+
+        println!(
+            "insert frame [{:?} ~ {:?}) [{:?} ~ {:?}) with {:?}",
+            start_va, end_va, start_vpn, end_vpn, permission
+        );
+        current_set.insert_framed_area(start_va, end_va, permission);
+
+        true
+    }
+
+    /// custom munmap impl
+    pub fn munmap(&self, start: usize, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current_set: &mut _ = &mut inner.memory_set;
+
+        let start_va: VirtAddr = start.into();
+        let end_va: VirtAddr = (start + len).into();
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        let mut i = start_vpn;
+        while i != end_vpn {
+            if let Some(pte) = current_set.translate(i) {
+                if !pte.is_valid() {
+                    return false;
+                }
+            }
+            i.0 += 1;
+        }
+
+        println!(
+            "delete frame [{:?} ~ {:?}) [{:?} ~ {:?})",
+            start_va, end_va, start_vpn, end_vpn
+        );
+        current_set.munmap(start_vpn, end_vpn);
+
+        true
     }
 }
 
