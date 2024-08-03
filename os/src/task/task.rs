@@ -1,7 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
 
 use super::{
-    kstack_alloc, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext,
+    kstack_alloc, mail, pid_alloc, KernelStack, PidHandle, SignalActions, SignalFlags, TaskContext,
 };
 use crate::syscall::TaskInfo;
 use crate::timer::get_time_ms;
@@ -104,6 +104,8 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    pub mail_post: mail::MailPost,
 }
 
 impl TaskControlBlockInner {
@@ -119,7 +121,7 @@ impl TaskControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
-    
+
     pub fn refresh_stop_watch(&mut self) -> usize {
         let start_time = self.stop_watch;
         self.stop_watch = get_time_ms();
@@ -188,6 +190,7 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    mail_post: Default::default(),
                 })
             },
         };
@@ -309,6 +312,7 @@ impl TaskControlBlock {
                     trap_ctx_backup: None,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    mail_post: Default::default(),
                 })
             },
         });

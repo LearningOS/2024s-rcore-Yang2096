@@ -4,11 +4,9 @@ use core::mem;
 use crate::{
     config::{MAX_SYSCALL_NUM, PAGE_SIZE},
     fs::{open_file, OpenFlags},
-    mm::translated_byte_buffer,
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{translated_byte_buffer, translated_ref, translated_refmut, translated_str, UserBuffer},
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next, pid2task,
-        get_current_task_info, mmap, munmap, suspend_current_and_run_next, SignalAction, SignalFlags, TaskStatus, MAX_SIG,
+        add_task, current_task, current_user_token, exit_current_and_run_next, get_current_task_info, mmap, munmap, pid2task, suspend_current_and_run_next, SignalAction, SignalFlags, TaskStatus, MAX_SIG
     },
     timer::get_time_us,
 };
@@ -332,4 +330,29 @@ pub fn sys_sigaction(
     } else {
         -1
     }
+}
+
+pub fn sys_mail_read(buf: *mut u8, len: usize) -> isize {
+    let token = current_user_token();
+    let buffer =UserBuffer::new( translated_byte_buffer(token, buf, len));
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let mut mail_post = inner.mail_post.clone();
+    drop(inner);
+    mail_post.pop(buffer)
+}
+
+pub fn sys_mail_write(pid: usize, buf: *mut u8, len: usize) -> isize {
+    let token = current_user_token();
+    let buffer =UserBuffer::new( translated_byte_buffer(token, buf, len));
+    let task = pid2task(pid);
+    let task = if let Some(t) = task {
+        t
+    } else {
+        return -1;
+    };
+    let inner = task.inner_exclusive_access();
+    let mut mail_post = inner.mail_post.clone();
+    drop(inner);
+    mail_post.push(buffer)
 }

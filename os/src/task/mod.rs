@@ -16,6 +16,7 @@ mod id;
 mod processor;
 mod signal;
 mod switch;
+mod mail;
 #[allow(clippy::module_inception)]
 mod task;
 
