@@ -106,17 +106,22 @@ impl BankerAlgo {
         result
     }
 
+    // 循环等待检查，根据所需要资源，查找持有它的线程，再根据这些线程所需的资源，检查资源的依赖链路
     fn loop_check(&self, vis: &mut Vec<bool>, resource_id: usize) -> CheckResult {
         for (tid, al) in self.allocation.iter().enumerate() {
+            // 当前线程对于此资源无占用
             if al[resource_id] == 0 {
                 continue;
             }
             for (r_id, need) in self.need[tid].iter().enumerate() {
+                // 当前线程正在等待某一资源
                 if *need > self.availiable[r_id] {
                     if vis[tid] {
+                        // 出现循环依赖
                         return CheckResult::Unsafe;
                     }
                     vis[tid] = true;
+                    // 针对当前线程等待的资源，递归检查是否有其他线程占用了它
                     if let CheckResult::Unsafe = self.loop_check(vis, r_id) {
                         return CheckResult::Unsafe;
                     }
